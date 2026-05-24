@@ -20,33 +20,31 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<Navigate to="/trainer/login" />} />
-
+        <Route path="/" element={<Navigate to="/student/login" />} />
+        <Route path="/student/login" element={<StudentLogin />} />
         <Route path="/trainer/login" element={<TrainerLogin />} />
-
         <Route element={<ProtectedTrainerRoute />}>
           <Route path="/trainer" element={<TrainerLayout />}>
-            <Route index element={<Navigate to="dashboard" replace />} />
-    <Route path="dashboard" element={<TrainerDashboard />} />
-    <Route path="modules" element={<ModulesPage />} />
-    <Route path="exams" element={<ExamsPage />} />
-    <Route path="students" element={<StudentsPage />} />
-    <Route path="questions" element={<QuestionsPage />} />
-            <Route path="results" element={<ResultsPage />} />
-            <Route path="trainers" element={<TrainersPage />} />
-  </Route>
-</Route>
+          <Route index element={<Navigate to="dashboard" replace />} />
+          <Route path="dashboard" element={<TrainerDashboard />} />
+          <Route path="modules" element={<ModulesPage />} />
+          <Route path="exams" element={<ExamsPage />} />
+          <Route path="students" element={<StudentsPage />} />
+          <Route path="questions" element={<QuestionsPage />} />
+          <Route path="results" element={<ResultsPage />} />
+          <Route path="trainers" element={<TrainersPage />} />
+        </Route>
+      </Route>
 
-        <Route path="/student/login" element={<StudentLogin />} />
 
-<Route element={<ProtectedStudentRoute />}>
-  <Route path="/student/exam" element={<StudentExam />} />
-</Route>
 
-<Route element={<ProtectedStudentResultRoute />}>
-  <Route path="/student/result" element={<StudentResult />} />
-</Route>
-      </Routes>
+        <Route element={<ProtectedStudentRoute />}>
+          <Route path="/student/exam" element={<StudentExam />} />
+        </Route>
+        <Route element={<ProtectedStudentResultRoute />}>
+          <Route path="/student/result" element={<StudentResult />} />
+        </Route>
+        </Routes>
     </BrowserRouter>    
   );
 }

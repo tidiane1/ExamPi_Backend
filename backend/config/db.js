@@ -1,12 +1,12 @@
 import Database from "better-sqlite3";
-import path from "path";
+import dotenv from "dotenv";
 
-const dbPath = path.join(process.cwd(), "database", "exam_server.db");
+dotenv.config();
+
+const dbPath = process.env.DB_PATH || "./database/exam_server.db";
 
 const db = new Database(dbPath);
 
 db.pragma("foreign_keys = ON");
-
-console.log("✅ SQLite connecté :", dbPath);
 
 export default db;
