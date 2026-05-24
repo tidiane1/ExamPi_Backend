@@ -105,7 +105,12 @@ function TrainersPage() {
     }
 
     try {
-      await api.post("/admin/trainers", form);
+      await api.post("/admin/trainers", {
+        full_name: form.full_name,
+        email: form.email,
+        password: form.password,
+        role: form.role,
+      });
 
       setMessage("Formateur ajouté avec succès");
 
@@ -133,7 +138,7 @@ function TrainersPage() {
     setEditForm({
       full_name: trainer.full_name,
       email: trainer.email,
-      password: trainer.password_hash || "",
+      password: "",
       role: trainer.role,
     });
   };
@@ -153,17 +158,23 @@ function TrainersPage() {
   const handleUpdate = async (id) => {
     resetMessages();
 
-    if (
-      !editForm.full_name?.trim() ||
-      !editForm.email?.trim() ||
-      !editForm.password?.trim()
-    ) {
-      setError("Nom complet, email et mot de passe sont obligatoires");
+    if (!editForm.full_name?.trim() || !editForm.email?.trim()) {
+      setError("Nom complet et email sont obligatoires");
       return;
     }
 
     try {
-      await api.put(`/admin/trainers/${id}`, editForm);
+      const payload = {
+        full_name: editForm.full_name,
+        email: editForm.email,
+        role: editForm.role,
+      };
+
+      if (editForm.password && editForm.password.trim() !== "") {
+        payload.password = editForm.password;
+      }
+
+      await api.put(`/admin/trainers/${id}`, payload);
 
       setMessage("Formateur modifié avec succès");
       cancelEdit();
@@ -378,6 +389,7 @@ function TrainersPage() {
                         name="password"
                         type="password"
                         size="small"
+                        placeholder="Nouveau mot de passe"
                         value={editForm.password || ""}
                         onChange={handleEditChange}
                       />

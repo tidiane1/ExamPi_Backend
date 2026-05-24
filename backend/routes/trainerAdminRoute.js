@@ -1,4 +1,5 @@
 import express from "express";
+import bcrypt from "bcrypt";
 import db from "../config/db.js";
 
 const router = express.Router();
@@ -14,7 +15,6 @@ router.get("/admin/trainers", (req, res) => {
         id,
         full_name,
         email,
-        password_hash,
         role,
         created_at
       FROM trainers
@@ -38,9 +38,9 @@ router.get("/admin/trainers", (req, res) => {
 
 /**
  * POST /api/admin/trainers
- * Créer un formateur
+ * Créer un formateur avec mot de passe hashé
  */
-router.post("/admin/trainers", (req, res) => {
+router.post("/admin/trainers", async (req, res) => {
   try {
     const {
       full_name,
@@ -57,7 +57,7 @@ router.post("/admin/trainers", (req, res) => {
     }
 
     const existingTrainer = db.prepare(`
-      SELECT * FROM trainers WHERE email = ?
+      SELECT id FROM trainers WHERE email = ?
     `).get(email);
 
     if (existingTrainer) {
@@ -66,6 +66,8 @@ router.post("/admin/trainers", (req, res) => {
         message: "Cet email est déjà utilisé"
       });
     }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = db.prepare(`
       INSERT INTO trainers (
@@ -78,7 +80,7 @@ router.post("/admin/trainers", (req, res) => {
     `).run(
       full_name,
       email,
-      password,
+      hashedPassword,
       role || "trainer"
     );
 
@@ -87,7 +89,6 @@ router.post("/admin/trainers", (req, res) => {
         id,
         full_name,
         email,
-        password_hash,
         role,
         created_at
       FROM trainers
@@ -112,8 +113,9 @@ router.post("/admin/trainers", (req, res) => {
 /**
  * PUT /api/admin/trainers/:id
  * Modifier un formateur
+ * Si password est vide ou absent, l'ancien mot de passe est conservé
  */
-router.put("/admin/trainers/:id", (req, res) => {
+router.put("/admin/trainers/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -137,7 +139,7 @@ router.put("/admin/trainers/:id", (req, res) => {
 
     if (email && email !== trainer.email) {
       const existingTrainer = db.prepare(`
-        SELECT * FROM trainers WHERE email = ?
+        SELECT id FROM trainers WHERE email = ?
       `).get(email);
 
       if (existingTrainer) {
@@ -146,6 +148,12 @@ router.put("/admin/trainers/:id", (req, res) => {
           message: "Cet email est déjà utilisé"
         });
       }
+    }
+
+    let passwordHash = trainer.password_hash;
+
+    if (password && password.trim() !== "") {
+      passwordHash = await bcrypt.hash(password, 10);
     }
 
     db.prepare(`
@@ -159,7 +167,7 @@ router.put("/admin/trainers/:id", (req, res) => {
     `).run(
       full_name ?? trainer.full_name,
       email ?? trainer.email,
-      password ?? trainer.password_hash,
+      passwordHash,
       role ?? trainer.role,
       id
     );
@@ -169,7 +177,6 @@ router.put("/admin/trainers/:id", (req, res) => {
         id,
         full_name,
         email,
-        password_hash,
         role,
         created_at
       FROM trainers
@@ -211,7 +218,7 @@ router.delete("/admin/trainers/:id", (req, res) => {
     }
 
     const exams = db.prepare(`
-      SELECT * FROM exams
+      SELECT id FROM exams
       WHERE trainer_id = ?
       LIMIT 1
     `).get(id);
@@ -224,7 +231,7 @@ router.delete("/admin/trainers/:id", (req, res) => {
     }
 
     const sessions = db.prepare(`
-      SELECT * FROM exam_sessions
+      SELECT id FROM exam_sessions
       WHERE started_by = ?
       LIMIT 1
     `).get(id);

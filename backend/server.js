@@ -9,6 +9,7 @@ import questionRoute from "./routes/questionRoute.js";
 import answerRoute from "./routes/answerRoute.js";
 import studentAdminRoute from "./routes/studentAdminRoute.js";
 import trainerAdminRoute from "./routes/trainerAdminRoute.js";
+
 dotenv.config();
 const app = express();
 
