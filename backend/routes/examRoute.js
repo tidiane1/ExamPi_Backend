@@ -361,12 +361,12 @@ router.put("/exams/:id", (req, res) => {
 
 /**
  * DELETE /api/exams/:id
- * Supprimer un examen
+ * Supprimer un examen et toutes ses données associées
  */
 router.delete("/exams/:id", (req, res) => {
-  try {
-    const { id } = req.params;
+  const { id } = req.params;
 
+  try {
     const exam = db.prepare(`
       SELECT * FROM exams WHERE id = ?
     `).get(id);
@@ -378,38 +378,97 @@ router.delete("/exams/:id", (req, res) => {
       });
     }
 
-    const sessions = db.prepare(`
-      SELECT * FROM exam_sessions WHERE exam_id = ?
-    `).all(id);
+    const deleteExamTransaction = db.transaction((examId) => {
 
-    if (sessions.length > 0) {
-      return res.status(409).json({
-        success: false,
-        message: "Impossible de supprimer cet examen car il possède déjà des sessions"
-      });
-    }
+      // 1. Supprimer les événements de sécurité
+      db.prepare(`
+        DELETE FROM security_events
+        WHERE attempt_id IN (
+          SELECT ea.id
+          FROM exam_attempts ea
+          INNER JOIN exam_sessions es
+            ON ea.session_id = es.id
+          WHERE es.exam_id = ?
+        )
+      `).run(examId);
 
-    db.prepare(`
-      DELETE FROM answers
-      WHERE question_id IN (
-        SELECT id FROM questions WHERE exam_id = ?
-      )
-    `).run(id);
+      // 2. Supprimer les réponses données par les étudiants
+      db.prepare(`
+        DELETE FROM student_answers
+        WHERE attempt_id IN (
+          SELECT ea.id
+          FROM exam_attempts ea
+          INNER JOIN exam_sessions es
+            ON ea.session_id = es.id
+          WHERE es.exam_id = ?
+        )
+      `).run(examId);
 
-    db.prepare(`
-      DELETE FROM questions WHERE exam_id = ?
-    `).run(id);
+      // 3. Supprimer les questions affectées aux tentatives
+      db.prepare(`
+        DELETE FROM attempt_questions
+        WHERE attempt_id IN (
+          SELECT ea.id
+          FROM exam_attempts ea
+          INNER JOIN exam_sessions es
+            ON ea.session_id = es.id
+          WHERE es.exam_id = ?
+        )
+      `).run(examId);
 
-    db.prepare(`
-      DELETE FROM exams WHERE id = ?
-    `).run(id);
+      // 4. Supprimer les tentatives
+      db.prepare(`
+        DELETE FROM exam_attempts
+        WHERE session_id IN (
+          SELECT id
+          FROM exam_sessions
+          WHERE exam_id = ?
+        )
+      `).run(examId);
+
+      // 5. Supprimer les sessions
+      db.prepare(`
+        DELETE FROM exam_sessions
+        WHERE exam_id = ?
+      `).run(examId);
+
+      // 6. Supprimer les réponses possibles des questions
+      db.prepare(`
+        DELETE FROM answers
+        WHERE question_id IN (
+          SELECT id
+          FROM questions
+          WHERE exam_id = ?
+        )
+      `).run(examId);
+
+      // 7. Supprimer les questions
+      db.prepare(`
+        DELETE FROM questions
+        WHERE exam_id = ?
+      `).run(examId);
+
+      // 8. Supprimer l'examen
+      const result = db.prepare(`
+        DELETE FROM exams
+        WHERE id = ?
+      `).run(examId);
+
+      return result;
+    });
+
+    const result = deleteExamTransaction(id);
 
     res.json({
       success: true,
-      message: "Examen supprimé avec succès"
+      message: "Examen et données associées supprimés avec succès",
+      deletedExamId: Number(id),
+      changes: result.changes
     });
 
   } catch (error) {
+    console.error("Erreur suppression examen :", error);
+
     res.status(500).json({
       success: false,
       message: "Erreur serveur pendant la suppression de l’examen",

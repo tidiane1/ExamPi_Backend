@@ -54,7 +54,7 @@ router.post("/admin/students", (req, res) => {
     if (!matricule || !first_name || !last_name || !secret_code) {
       return res.status(400).json({
         success: false,
-        message: "matricule, first_name, last_name et secret_code sont obligatoires"
+        message: "matricule, prénom, nom et code secret sont obligatoires"
       });
     }
 
