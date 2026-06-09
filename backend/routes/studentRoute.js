@@ -3,616 +3,1300 @@ import db from "../config/db.js";
 
 const router = express.Router();
 
+/**
+ * Mélange un tableau.
+ */
+function shuffleArray(values) {
+  const shuffledValues = [...values];
+
+  for (
+    let index = shuffledValues.length - 1;
+    index > 0;
+    index -= 1
+  ) {
+    const randomIndex = Math.floor(
+      Math.random() * (index + 1)
+    );
+
+    [
+      shuffledValues[index],
+      shuffledValues[randomIndex],
+    ] = [
+      shuffledValues[randomIndex],
+      shuffledValues[index],
+    ];
+  }
+
+  return shuffledValues;
+}
+
+/**
+ * Transforme une date SQLite UTC en objet Date.
+ */
+function parseSqliteDate(value) {
+  if (!value) {
+    return null;
+  }
+
+  let normalizedValue = String(value)
+    .trim()
+    .replace(" ", "T");
+
+  const hasTimezone =
+    normalizedValue.endsWith("Z") ||
+    /[+-]\d{2}:\d{2}$/.test(normalizedValue);
+
+  if (!hasTimezone) {
+    normalizedValue += "Z";
+  }
+
+  const parsedDate = new Date(normalizedValue);
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    return null;
+  }
+
+  return parsedDate;
+}
+
+/**
+ * Normalise une liste d’identifiants.
+ */
+function normalizeIds(values) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  return [
+    ...new Set(
+      values
+        .map(Number)
+        .filter(
+          (value) =>
+            Number.isInteger(value) &&
+            value > 0
+        )
+    ),
+  ].sort((first, second) => first - second);
+}
+
+/**
+ * Vérifie que deux ensembles d’identifiants sont identiques.
+ */
+function haveSameIds(firstValues, secondValues) {
+  const firstIds = normalizeIds(firstValues);
+  const secondIds = normalizeIds(secondValues);
+
+  return (
+    firstIds.length === secondIds.length &&
+    firstIds.every(
+      (identifier, index) =>
+        identifier === secondIds[index]
+    )
+  );
+}
+
+/**
+ * Recherche le contexte complet d’une tentative.
+ */
+function getAttemptContext(attemptId) {
+  return db
+    .prepare(
+      `
+        SELECT
+          exam_attempts.id,
+          exam_attempts.student_id,
+          exam_attempts.session_id,
+          exam_attempts.start_time,
+          exam_attempts.end_time,
+          exam_attempts.status,
+          exam_attempts.score,
+          exam_attempts.percentage,
+          exam_attempts.validation_status,
+          exam_attempts.cheating_detected,
+          exam_attempts.cheating_reason,
+
+          exam_sessions.exam_id,
+          exam_sessions.status AS session_status,
+
+          exams.title AS exam_title,
+          exams.duration_minutes,
+          exams.number_of_questions,
+          exams.success_percentage,
+          exams.random_questions,
+          exams.random_answers
+
+        FROM exam_attempts
+
+        JOIN exam_sessions
+          ON exam_attempts.session_id =
+             exam_sessions.id
+
+        JOIN exams
+          ON exam_sessions.exam_id =
+             exams.id
+
+        WHERE exam_attempts.id = ?
+      `
+    )
+    .get(attemptId);
+}
+
+/**
+ * Calcule le nombre de secondes restantes.
+ */
+function calculateRemainingSeconds(
+  attempt,
+  durationMinutes
+) {
+  const startDate = parseSqliteDate(
+    attempt.start_time
+  );
+
+  if (!startDate) {
+    return 0;
+  }
+
+  const durationSeconds =
+    Math.max(
+      0,
+      Number(durationMinutes || 0)
+    ) * 60;
+
+  const elapsedSeconds = Math.floor(
+    (Date.now() - startDate.getTime()) / 1000
+  );
+
+  return Math.max(
+    0,
+    durationSeconds - elapsedSeconds
+  );
+}
+
+/**
+ * GET /api/students
+ */
 router.get("/students", (req, res) => {
-  const students = db.prepare(`
-    SELECT 
-      id,
-      matricule,
-      first_name,
-      last_name,
-      is_active,
-      secret_code,
-      created_at
-    FROM students
-  `).all();
-
-  res.json(students);
-});
-router.post("/student/login", (req, res) => {
-  const { matricule, secret_code } = req.body;
-
-  if (!matricule || !secret_code) {
-    return res.status(400).json({
-      message: "Matricule et code secret obligatoires"
-    });
-  }
-
-  const student = db.prepare(`
-    SELECT id, matricule, first_name, last_name, is_active
-    FROM students
-    WHERE matricule = ? AND secret_code = ?
-  `).get(matricule, secret_code);
-
-  if (!student) {
-    return res.status(401).json({
-      message: "Matricule ou code secret incorrect"
-    });
-  }
-
-  if (student.is_active !== 1) {
-    return res.status(403).json({
-      message: "Votre compte n’est pas autorisé à passer l’examen"
-    });
-  }
-
-  res.json({
-    message: "Connexion réussie",
-    student
-  });
-});
-router.post("/student/start-exam", (req, res) => {
-  const { matricule, secret_code, exam_id } = req.body;
-
-  if (!matricule || !secret_code || !exam_id) {
-    return res.status(400).json({
-      success: false,
-      message: "matricule, secret_code et exam_id sont obligatoires"
-    });
-  }
-
-  // 1. Vérifier l'étudiant
-  const student = db.prepare(`
-    SELECT 
-      id,
-      matricule,
-      first_name,
-      last_name,
-      is_active
-    FROM students
-    WHERE matricule = ? AND secret_code = ?
-  `).get(matricule, secret_code);
-
-  if (!student) {
-    return res.status(401).json({
-      success: false,
-      message: "Matricule ou code secret incorrect"
-    });
-  }
-
-  if (student.is_active !== 1) {
-    return res.status(403).json({
-      success: false,
-      message: "Votre compte n’est pas autorisé à passer l’examen"
-    });
-  }
-
-  // 2. Vérifier si la session est ouverte
-  const session = db.prepare(`
-    SELECT 
-      exam_sessions.id,
-      exam_sessions.exam_id,
-      exam_sessions.status,
-      exam_sessions.start_time,
-      exams.title,
-      exams.duration_minutes,
-      exams.number_of_questions,
-      exams.success_percentage
-    FROM exam_sessions
-    JOIN exams ON exam_sessions.exam_id = exams.id
-    WHERE exam_sessions.exam_id = ?
-    AND exam_sessions.status = 'open'
-    ORDER BY exam_sessions.id DESC
-    LIMIT 1
-  `).get(exam_id);
-
-  if (!session) {
-    return res.status(403).json({
-      success: false,
-      message: "L’examen n’est pas encore démarré par le formateur"
-    });
-  }
-
-  // 3. Vérifier si l'étudiant a déjà une tentative
-  const existingAttempt = db.prepare(`
-    SELECT * FROM exam_attempts
-    WHERE session_id = ? AND student_id = ?
-  `).get(session.id, student.id);
-
-  if (existingAttempt) {
-    return res.status(409).json({
-      success: false,
-      message: "Vous avez déjà commencé cet examen",
-      attempt: existingAttempt
-    });
-  }
-
-  // 4. Créer une tentative d'examen
-  const attemptResult = db.prepare(`
-    INSERT INTO exam_attempts (
-      session_id,
-      student_id,
-      status,
-      validation_status,
-      is_submitted
-    )
-    VALUES (?, ?, 'in_progress', 'pending', 0)
-  `).run(session.id, student.id);
-
-  const attemptId = attemptResult.lastInsertRowid;
-
-  // 5. Tirer les questions aléatoirement
-  const questions = db.prepare(`
-    SELECT 
-      id,
-      question_text,
-      question_type,
-      points
-    FROM questions
-    WHERE exam_id = ?
-    AND is_active = 1
-    ORDER BY RANDOM()
-    LIMIT ?
-  `).all(exam_id, session.number_of_questions);
-
-  if (questions.length === 0) {
-    return res.status(404).json({
-      success: false,
-      message: "Aucune question disponible pour cet examen"
-    });
-  }
-
-  // 6. Enregistrer les questions attribuées à cet étudiant
-  const insertAttemptQuestion = db.prepare(`
-    INSERT INTO attempt_questions (
-      attempt_id,
-      question_id,
-      question_order
-    )
-    VALUES (?, ?, ?)
-  `);
-
-  questions.forEach((question, index) => {
-    insertAttemptQuestion.run(attemptId, question.id, index + 1);
-  });
-
-  // 7. Récupérer les questions avec réponses mélangées
-  const questionsWithAnswers = questions.map((question, index) => {
-    const answers = db.prepare(`
-      SELECT 
-        id,
-        answer_text
-      FROM answers
-      WHERE question_id = ?
-      ORDER BY RANDOM()
-    `).all(question.id);
-
-    return {
-      order: index + 1,
-      id: question.id,
-      question_text: question.question_text,
-      question_type: question.question_type,
-      points: question.points,
-      answers
-    };
-  });
-
-  res.status(201).json({
-    success: true,
-    message: "Examen démarré avec succès",
-    student,
-    session: {
-      id: session.id,
-      exam_id: session.exam_id,
-      title: session.title,
-      duration_minutes: session.duration_minutes,
-      number_of_questions: session.number_of_questions,
-      success_percentage: session.success_percentage
-    },
-    attempt: {
-      id: attemptId,
-      status: "in_progress"
-    },
-    questions: questionsWithAnswers
-  });
-});
-router.post("/student/submit-exam", (req, res) => {
   try {
-    const { attempt_id, answers } = req.body;
+    const students = db
+      .prepare(
+        `
+          SELECT
+            id,
+            matricule,
+            first_name,
+            last_name,
+            is_active,
+            created_at
+          FROM students
+          ORDER BY id DESC
+        `
+      )
+      .all();
 
-    if (!attempt_id || !Array.isArray(answers) || answers.length === 0) {
+    return res.json({
+      success: true,
+      count: students.length,
+      students,
+    });
+  } catch (error) {
+    console.error("GET /students :", error);
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Erreur pendant la récupération des étudiants",
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/student/login
+ */
+router.post("/student/login", (req, res) => {
+  try {
+    const matricule = String(
+      req.body.matricule || ""
+    ).trim();
+
+    const secretCode = String(
+      req.body.secret_code || ""
+    ).trim();
+
+    if (!matricule || !secretCode) {
       return res.status(400).json({
         success: false,
-        message: "attempt_id et answers sont obligatoires"
+        message:
+          "Matricule et code secret obligatoires",
       });
     }
 
-    // 1. Vérifier la tentative
-    const attempt = db.prepare(`
-      SELECT 
-        exam_attempts.id,
-        exam_attempts.session_id,
-        exam_attempts.student_id,
-        exam_attempts.start_time,
-        exam_attempts.status,
-        exam_attempts.is_submitted,
-        exam_sessions.exam_id,
-        exams.success_percentage,
-        exams.duration_minutes
-      FROM exam_attempts
-      JOIN exam_sessions ON exam_attempts.session_id = exam_sessions.id
-      JOIN exams ON exam_sessions.exam_id = exams.id
-      WHERE exam_attempts.id = ?
-    `).get(attempt_id);
-
-    if (!attempt) {
-      return res.status(404).json({
-        success: false,
-        message: "Tentative introuvable"
-      });
-    }
-
-    if (attempt.is_submitted === 1 || attempt.status === "submitted") {
-      return res.status(409).json({
-        success: false,
-        message: "Cet examen a déjà été soumis"
-      });
-    }
-
-    if (attempt.status !== "in_progress") {
-      return res.status(403).json({
-        success: false,
-        message: "Cette tentative n’est plus active"
-      });
-    }
-
-    // 2. Vérifier si le temps est dépassé
-    const startTime = new Date(attempt.start_time.replace(" ", "T") + "Z");
-    const now = new Date();
-
-    if (isNaN(startTime.getTime())) {
-      return res.status(500).json({
-        success: false,
-        message: "Format de date invalide dans start_time",
-        start_time: attempt.start_time
-      });
-    }
-
-    const elapsedSeconds = Math.floor((now - startTime) / 1000);
-    const durationSeconds = Number(attempt.duration_minutes) * 60;
-
-    if (elapsedSeconds > durationSeconds) {
-      db.prepare(`
-        UPDATE exam_attempts
-        SET 
-          end_time = CURRENT_TIMESTAMP,
-          status = 'expired',
-          validation_status = 'failed',
-          is_submitted = 1
-        WHERE id = ?
-      `).run(attempt_id);
-
-      return res.status(403).json({
-        success: false,
-        message: "Temps écoulé. L’examen est expiré.",
-        status: "expired"
-      });
-    }
-
-    // 3. Récupérer les questions attribuées à cet étudiant
-    const attemptQuestions = db.prepare(`
-      SELECT 
-        attempt_questions.question_id,
-        questions.points
-      FROM attempt_questions
-      JOIN questions ON attempt_questions.question_id = questions.id
-      WHERE attempt_questions.attempt_id = ?
-    `).all(attempt_id);
-
-    if (attemptQuestions.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Aucune question trouvée pour cette tentative"
-      });
-    }
-
-    const allowedQuestionIds = attemptQuestions.map(q => q.question_id);
-
-    // 4. Nettoyer les anciennes réponses au cas où
-    db.prepare(`
-      DELETE FROM student_answers
-      WHERE attempt_id = ?
-    `).run(attempt_id);
-
-    const insertStudentAnswer = db.prepare(`
-      INSERT INTO student_answers (
-        attempt_id,
-        question_id,
-        answer_id,
-        is_correct
+    const student = db
+      .prepare(
+        `
+          SELECT
+            id,
+            matricule,
+            first_name,
+            last_name,
+            is_active,
+            created_at
+          FROM students
+          WHERE matricule = ?
+            AND secret_code = ?
+        `
       )
-      VALUES (?, ?, ?, ?)
-    `);
+      .get(matricule, secretCode);
 
-    let score = 0;
-    let totalPoints = 0;
-    let correctAnswersCount = 0;
-
-    for (const question of attemptQuestions) {
-      totalPoints += Number(question.points);
+    if (!student) {
+      return res.status(401).json({
+        success: false,
+        message:
+          "Matricule ou code secret incorrect",
+      });
     }
 
-    // 5. Vérifier chaque réponse envoyée
-    for (const item of answers) {
-      const { question_id, answer_id } = item;
+    if (Number(student.is_active) !== 1) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Ce compte étudiant est désactivé",
+      });
+    }
 
-      if (!question_id || !answer_id) {
+    const exams = db
+      .prepare(
+        `
+          SELECT DISTINCT
+            exams.id,
+            exams.module_id,
+            exams.title,
+            exams.description,
+            exams.duration_minutes,
+            exams.number_of_questions,
+            exams.success_percentage,
+            exams.random_questions,
+            exams.random_answers,
+            exams.is_published,
+
+            modules.name AS module_name,
+
+            exam_sessions.id AS session_id,
+            exam_sessions.status AS session_status
+
+          FROM exams
+
+          JOIN modules
+            ON exams.module_id = modules.id
+
+          JOIN exam_sessions
+            ON exam_sessions.exam_id = exams.id
+
+          WHERE exams.is_published = 1
+            AND exam_sessions.status IN (
+              'open',
+              'active',
+              'started',
+              'in_progress'
+            )
+
+          ORDER BY exams.id DESC
+        `
+      )
+      .all();
+
+    return res.json({
+      success: true,
+      message:
+        "Connexion étudiant réussie",
+      student,
+      exams,
+    });
+  } catch (error) {
+    console.error(
+      "POST /student/login :",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Erreur pendant la connexion étudiant",
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/student/start-exam
+ */
+router.post(
+  "/student/start-exam",
+  (req, res) => {
+    try {
+      const matricule = String(
+        req.body.matricule || ""
+      ).trim();
+
+      const secretCode = String(
+        req.body.secret_code || ""
+      ).trim();
+
+      const examId = Number(
+        req.body.exam_id
+      );
+
+      if (
+        !matricule ||
+        !secretCode ||
+        !Number.isInteger(examId)
+      ) {
         return res.status(400).json({
           success: false,
-          message: "Chaque réponse doit contenir question_id et answer_id"
+          message:
+            "Matricule, code secret et examen obligatoires",
         });
       }
 
-      if (!allowedQuestionIds.includes(question_id)) {
+      const student = db
+        .prepare(
+          `
+            SELECT
+              id,
+              matricule,
+              first_name,
+              last_name,
+              is_active
+            FROM students
+            WHERE matricule = ?
+              AND secret_code = ?
+          `
+        )
+        .get(matricule, secretCode);
+
+      if (!student) {
+        return res.status(401).json({
+          success: false,
+          message:
+            "Matricule ou code secret incorrect",
+        });
+      }
+
+      if (Number(student.is_active) !== 1) {
         return res.status(403).json({
           success: false,
-          message: `La question ${question_id} n’appartient pas à cette tentative`
+          message:
+            "Ce compte étudiant est désactivé",
         });
       }
 
-      const answer = db.prepare(`
-        SELECT 
-          answers.id,
-          answers.question_id,
-          answers.is_correct,
-          questions.points
-        FROM answers
-        JOIN questions ON answers.question_id = questions.id
-        WHERE answers.id = ?
-        AND answers.question_id = ?
-      `).get(answer_id, question_id);
+      const exam = db
+        .prepare(
+          `
+            SELECT
+              exams.id,
+              exams.module_id,
+              exams.title,
+              exams.description,
+              exams.duration_minutes,
+              exams.number_of_questions,
+              exams.success_percentage,
+              exams.random_questions,
+              exams.random_answers,
+              exams.is_published,
 
-      if (!answer) {
+              modules.name AS module_name
+
+            FROM exams
+
+            JOIN modules
+              ON exams.module_id = modules.id
+
+            WHERE exams.id = ?
+          `
+        )
+        .get(examId);
+
+      if (!exam) {
         return res.status(404).json({
           success: false,
-          message: `Réponse introuvable pour la question ${question_id}`
+          message: "Examen introuvable",
         });
       }
 
-      const isCorrect = answer.is_correct === 1 ? 1 : 0;
-
-      if (isCorrect === 1) {
-        score += Number(answer.points);
-        correctAnswersCount += 1;
+      if (Number(exam.is_published) !== 1) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "Cet examen n’est pas publié",
+        });
       }
 
-      insertStudentAnswer.run(
-        attempt_id,
-        question_id,
-        answer_id,
-        isCorrect
+      const session = db
+        .prepare(
+          `
+            SELECT *
+            FROM exam_sessions
+            WHERE exam_id = ?
+              AND status IN (
+                'open',
+                'active',
+                'started',
+                'in_progress'
+              )
+            ORDER BY id DESC
+            LIMIT 1
+          `
+        )
+        .get(examId);
+
+      if (!session) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "Le formateur n’a pas encore démarré cet examen",
+        });
+      }
+
+      const existingAttempt = db
+        .prepare(
+          `
+            SELECT *
+            FROM exam_attempts
+            WHERE student_id = ?
+              AND session_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+          `
+        )
+        .get(student.id, session.id);
+
+      if (existingAttempt) {
+        if (
+          existingAttempt.status ===
+          "in_progress"
+        ) {
+          return res.status(409).json({
+            success: false,
+            message:
+              "Une tentative est déjà en cours pour cet étudiant",
+          });
+        }
+
+        return res.status(409).json({
+          success: false,
+          message:
+            "Cet étudiant a déjà passé cet examen pendant cette session",
+        });
+      }
+
+      let availableQuestions = db
+        .prepare(
+          `
+            SELECT
+              id,
+              exam_id,
+              question_text,
+              question_type,
+              points,
+              is_active
+            FROM questions
+            WHERE exam_id = ?
+              AND is_active = 1
+            ORDER BY id ASC
+          `
+        )
+        .all(examId);
+
+      if (availableQuestions.length === 0) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Aucune question active pour cet examen",
+        });
+      }
+
+      const requestedQuestionCount = Math.min(
+        Math.max(
+          1,
+          Number(
+            exam.number_of_questions || 1
+          )
+        ),
+        availableQuestions.length
       );
-    }
 
-    // 6. Calcul du résultat
-    const percentage = totalPoints > 0 ? (score / totalPoints) * 100 : 0;
-
-    const validationStatus =
-      percentage >= attempt.success_percentage ? "passed" : "failed";
-
-    db.prepare(`
-      UPDATE exam_attempts
-      SET 
-        end_time = CURRENT_TIMESTAMP,
-        score = ?,
-        percentage = ?,
-        status = 'submitted',
-        validation_status = ?,
-        is_submitted = 1
-      WHERE id = ?
-    `).run(
-      score,
-      percentage,
-      validationStatus,
-      attempt_id
-    );
-
-    res.json({
-      success: true,
-      message: "Examen soumis avec succès",
-      result: {
-        attempt_id,
-        score,
-        totalPoints,
-        percentage: Number(percentage.toFixed(2)),
-        correctAnswersCount,
-        totalQuestions: attemptQuestions.length,
-        success_percentage_required: attempt.success_percentage,
-        validation_status: validationStatus
+      if (
+        Number(exam.random_questions) === 1
+      ) {
+        availableQuestions =
+          shuffleArray(availableQuestions);
       }
-    });
 
-  } catch (error) {
-    console.error("Erreur submit-exam :", error);
+      const selectedQuestions =
+        availableQuestions.slice(
+          0,
+          requestedQuestionCount
+        );
 
-    res.status(500).json({
-      success: false,
-      message: "Erreur serveur pendant la soumission de l’examen",
-      error: error.message
-    });
-  }
-});
-router.get("/student/exam-timer/:attempt_id", (req, res) => {
-  try {
-    const { attempt_id } = req.params;
+      const createAttemptTransaction =
+        db.transaction(() => {
+          const attemptResult = db
+            .prepare(
+              `
+                INSERT INTO exam_attempts (
+                  student_id,
+                  session_id,
+                  start_time,
+                  status,
+                  score,
+                  percentage,
+                  validation_status,
+                  cheating_detected
+                )
+                VALUES (
+                  ?,
+                  ?,
+                  CURRENT_TIMESTAMP,
+                  'in_progress',
+                  0,
+                  0,
+                  'pending',
+                  0
+                )
+              `
+            )
+            .run(
+              student.id,
+              session.id
+            );
 
-    const attempt = db.prepare(`
-      SELECT 
-        exam_attempts.id,
-        exam_attempts.start_time,
-        exam_attempts.end_time,
-        exam_attempts.status,
-        exam_attempts.is_submitted,
-        exams.duration_minutes
-      FROM exam_attempts
-      JOIN exam_sessions ON exam_attempts.session_id = exam_sessions.id
-      JOIN exams ON exam_sessions.exam_id = exams.id
-      WHERE exam_attempts.id = ?
-    `).get(attempt_id);
+          const attemptId = Number(
+            attemptResult.lastInsertRowid
+          );
 
-    if (!attempt) {
-      return res.status(404).json({
-        success: false,
-        message: "Tentative introuvable"
-      });
-    }
+          /*
+           * question_order est obligatoire
+           * dans la table attempt_questions.
+           */
+          const insertAttemptQuestion =
+            db.prepare(
+              `
+                INSERT INTO attempt_questions (
+                  attempt_id,
+                  question_id,
+                  question_order
+                )
+                VALUES (?, ?, ?)
+              `
+            );
 
-    if (attempt.status !== "in_progress") {
-      return res.json({
+          selectedQuestions.forEach(
+            (question, index) => {
+              insertAttemptQuestion.run(
+                attemptId,
+                question.id,
+                index + 1
+              );
+            }
+          );
+
+          return attemptId;
+        });
+
+      const attemptId =
+        createAttemptTransaction();
+
+      const questionsForStudent =
+        selectedQuestions.map((question) => {
+          let questionAnswers = db
+            .prepare(
+              `
+                SELECT
+                  id,
+                  question_id,
+                  answer_text
+                FROM answers
+                WHERE question_id = ?
+                ORDER BY id ASC
+              `
+            )
+            .all(question.id);
+
+          if (
+            Number(exam.random_answers) === 1
+          ) {
+            questionAnswers =
+              shuffleArray(questionAnswers);
+          }
+
+          /*
+           * question_type est envoyé explicitement.
+           */
+          return {
+            id: question.id,
+            exam_id: question.exam_id,
+            question_text:
+              question.question_text,
+            question_type:
+              question.question_type,
+            points: Number(
+              question.points || 0
+            ),
+            answers: questionAnswers,
+          };
+        });
+
+      return res.status(201).json({
         success: true,
-        message: "La tentative n’est plus active",
-        status: attempt.status,
-        remaining_seconds: 0,
-        expired: true
+        message:
+          "Examen démarré avec succès",
+
+        student: {
+          id: student.id,
+          matricule: student.matricule,
+          first_name: student.first_name,
+          last_name: student.last_name,
+        },
+
+        exam: {
+          id: exam.id,
+          module_id: exam.module_id,
+          module_name: exam.module_name,
+          title: exam.title,
+          description: exam.description,
+          duration_minutes:
+            exam.duration_minutes,
+          number_of_questions:
+            exam.number_of_questions,
+          success_percentage:
+            exam.success_percentage,
+        },
+
+        session: {
+          id: session.id,
+          exam_id: session.exam_id,
+          status: session.status,
+        },
+
+        attempt: {
+          id: attemptId,
+          student_id: student.id,
+          session_id: session.id,
+          status: "in_progress",
+        },
+
+        remaining_seconds:
+          Number(
+            exam.duration_minutes || 0
+          ) * 60,
+
+        questions: questionsForStudent,
       });
-    }
+    } catch (error) {
+      console.error(
+        "POST /student/start-exam :",
+        error
+      );
 
-    // Conversion propre du format SQLite vers Date JavaScript
-    const startTime = new Date(attempt.start_time.replace(" ", "T") + "Z");
-    const now = new Date();
-
-    if (isNaN(startTime.getTime())) {
       return res.status(500).json({
         success: false,
-        message: "Format de date invalide dans start_time",
-        start_time: attempt.start_time
+        message:
+          "Erreur pendant le démarrage de l’examen",
+        error: error.message,
       });
     }
+  }
+);
 
-    const elapsedSeconds = Math.floor((now - startTime) / 1000);
-    const durationSeconds = Number(attempt.duration_minutes) * 60;
-    const remainingSeconds = durationSeconds - elapsedSeconds;
+/**
+ * GET /api/student/exam-timer/:attempt_id
+ */
+router.get(
+  "/student/exam-timer/:attempt_id",
+  (req, res) => {
+    try {
+      const attemptId = Number(
+        req.params.attempt_id
+      );
 
-    if (remainingSeconds <= 0) {
-      db.prepare(`
-        UPDATE exam_attempts
-        SET 
-          end_time = CURRENT_TIMESTAMP,
-          status = 'expired',
-          validation_status = 'failed',
-          is_submitted = 1
-        WHERE id = ?
-      `).run(attempt_id);
+      if (!Number.isInteger(attemptId)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Identifiant de tentative invalide",
+        });
+      }
+
+      const attempt =
+        getAttemptContext(attemptId);
+
+      if (!attempt) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "Tentative introuvable",
+        });
+      }
+
+      if (
+        attempt.status !== "in_progress"
+      ) {
+        return res.json({
+          success: true,
+          remaining_seconds: 0,
+          expired: true,
+          status: attempt.status,
+        });
+      }
+
+      const remainingSeconds =
+        calculateRemainingSeconds(
+          attempt,
+          attempt.duration_minutes
+        );
 
       return res.json({
         success: true,
-        message: "Temps écoulé, examen expiré",
-        status: "expired",
-        remaining_seconds: 0,
-        expired: true
+        attempt_id: attempt.id,
+        status: attempt.status,
+        remaining_seconds:
+          remainingSeconds,
+        expired:
+          remainingSeconds <= 0,
+      });
+    } catch (error) {
+      console.error(
+        "GET /student/exam-timer :",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Erreur pendant la récupération du chronomètre",
+        error: error.message,
       });
     }
-
-    res.json({
-      success: true,
-      message: "Chrono actif",
-      status: "in_progress",
-      duration_minutes: attempt.duration_minutes,
-      elapsed_seconds: elapsedSeconds,
-      remaining_seconds: remainingSeconds,
-      expired: false
-    });
-
-  } catch (error) {
-    console.error("Erreur exam-timer :", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Erreur serveur pendant la vérification du chrono",
-      error: error.message
-    });
   }
-});
-router.post("/student/security-event", (req, res) => {
-  try {
-    const { attempt_id, event_type, description } = req.body;
+);
 
-    if (!attempt_id || !event_type) {
-      return res.status(400).json({
+/**
+ * POST /api/student/security-event
+ */
+router.post(
+  "/student/security-event",
+  (req, res) => {
+    try {
+      const attemptId = Number(
+        req.body.attempt_id
+      );
+
+      const eventType = String(
+        req.body.event_type ||
+          "TAB_HIDDEN"
+      ).trim();
+
+      const description = String(
+        req.body.description ||
+          "L’étudiant a quitté l’onglet de l’examen"
+      ).trim();
+
+      if (!Number.isInteger(attemptId)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Identifiant de tentative invalide",
+        });
+      }
+
+      const attempt =
+        getAttemptContext(attemptId);
+
+      if (!attempt) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "Tentative introuvable",
+        });
+      }
+
+      if (
+        attempt.status !== "in_progress"
+      ) {
+        return res.json({
+          success: true,
+          message:
+            "Cette tentative est déjà terminée",
+          attempt_id: attempt.id,
+          status: attempt.status,
+          score: attempt.score,
+          percentage:
+            attempt.percentage,
+          validation_status:
+            attempt.validation_status,
+          cheating_detected:
+            attempt.cheating_detected,
+        });
+      }
+
+      const stopAttemptTransaction =
+        db.transaction(() => {
+          db.prepare(
+            `
+              INSERT INTO security_events (
+                attempt_id,
+                event_type,
+                description,
+                created_at
+              )
+              VALUES (
+                ?,
+                ?,
+                ?,
+                CURRENT_TIMESTAMP
+              )
+            `
+          ).run(
+            attemptId,
+            eventType,
+            description
+          );
+
+          db.prepare(
+            `
+              UPDATE exam_attempts
+              SET
+                status = 'stopped',
+                end_time = CURRENT_TIMESTAMP,
+                score = 0,
+                percentage = 0,
+                validation_status = 'failed',
+                cheating_detected = 1,
+                cheating_reason = ?
+              WHERE id = ?
+            `
+          ).run(
+            description,
+            attemptId
+          );
+        });
+
+      stopAttemptTransaction();
+
+      return res.status(200).json({
         success: false,
-        message: "attempt_id et event_type sont obligatoires"
+        message:
+          "Examen arrêté : changement d’onglet détecté.",
+        attempt_id: attemptId,
+        status: "stopped",
+        score: 0,
+        percentage: 0,
+        validation_status: "failed",
+        cheating_detected: 1,
+        cheating_reason: description,
+
+        exam: {
+          id: attempt.exam_id,
+          title: attempt.exam_title,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "POST /student/security-event :",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Erreur pendant l’enregistrement de l’événement de sécurité",
+        error: error.message,
       });
     }
-
-    const attempt = db.prepare(`
-      SELECT 
-        id,
-        status,
-        is_submitted
-      FROM exam_attempts
-      WHERE id = ?
-    `).get(attempt_id);
-
-    if (!attempt) {
-      return res.status(404).json({
-        success: false,
-        message: "Tentative introuvable"
-      });
-    }
-
-    if (attempt.status !== "in_progress") {
-      return res.status(409).json({
-        success: false,
-        message: "La tentative n’est plus active",
-        status: attempt.status
-      });
-    }
-
-    db.prepare(`
-      INSERT INTO security_events (
-        attempt_id,
-        event_type,
-        description
-      )
-      VALUES (?, ?, ?)
-    `).run(
-      attempt_id,
-      event_type,
-      description || "Événement de sécurité détecté"
-    );
-
-    db.prepare(`
-      UPDATE exam_attempts
-      SET 
-        end_time = CURRENT_TIMESTAMP,
-        status = 'stopped',
-        validation_status = 'failed',
-        cheating_detected = 1,
-        cheating_reason = ?,
-        is_submitted = 1
-      WHERE id = ?
-    `).run(
-      description || event_type,
-      attempt_id
-    );
-
-    const updatedAttempt = db.prepare(`
-      SELECT * FROM exam_attempts WHERE id = ?
-    `).get(attempt_id);
-
-    res.json({
-      success: true,
-      message: "Événement de sécurité enregistré. Examen arrêté automatiquement.",
-      attempt: updatedAttempt
-    });
-
-  } catch (error) {
-    console.error("Erreur security-event :", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Erreur serveur pendant l’enregistrement de l’événement de sécurité",
-      error: error.message
-    });
   }
-});
+);
+
+/**
+ * POST /api/student/submit-exam
+ */
+router.post(
+  "/student/submit-exam",
+  (req, res) => {
+    try {
+      const attemptId = Number(
+        req.body.attempt_id
+      );
+
+      const submittedAnswers =
+        Array.isArray(req.body.answers)
+          ? req.body.answers
+          : [];
+
+      const automatic =
+        Boolean(req.body.automatic);
+
+      if (!Number.isInteger(attemptId)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Identifiant de tentative invalide",
+        });
+      }
+
+      const attempt =
+        getAttemptContext(attemptId);
+
+      if (!attempt) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "Tentative introuvable",
+        });
+      }
+
+      if (
+        attempt.status !== "in_progress"
+      ) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Cette tentative est déjà terminée",
+          status: attempt.status,
+        });
+      }
+
+      const attemptQuestions = db
+        .prepare(
+          `
+            SELECT
+              questions.id,
+              questions.question_text,
+              questions.question_type,
+              questions.points,
+              attempt_questions.question_order
+
+            FROM attempt_questions
+
+            JOIN questions
+              ON attempt_questions.question_id =
+                 questions.id
+
+            WHERE attempt_questions.attempt_id = ?
+
+            ORDER BY
+              attempt_questions.question_order ASC
+          `
+        )
+        .all(attemptId);
+
+      if (attemptQuestions.length === 0) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Aucune question associée à cette tentative",
+        });
+      }
+
+      /*
+       * Map :
+       * question_id -> answer_ids
+       */
+      const answersByQuestion =
+        new Map();
+
+      submittedAnswers.forEach(
+        (submittedAnswer) => {
+          const questionId = Number(
+            submittedAnswer.question_id
+          );
+
+          if (
+            !Number.isInteger(questionId)
+          ) {
+            return;
+          }
+
+          /*
+           * Compatibilité avec l’ancien format answer_id.
+           */
+          const answerIds = Array.isArray(
+            submittedAnswer.answer_ids
+          )
+            ? submittedAnswer.answer_ids
+            : submittedAnswer.answer_id
+              ? [
+                  submittedAnswer.answer_id,
+                ]
+              : [];
+
+          answersByQuestion.set(
+            questionId,
+            normalizeIds(answerIds)
+          );
+        }
+      );
+
+      let obtainedScore = 0;
+      let maximumScore = 0;
+      let correctQuestions = 0;
+
+      const details = [];
+
+      const submitTransaction =
+        db.transaction(() => {
+          /*
+           * Supprime une éventuelle soumission partielle.
+           */
+          db.prepare(
+            `
+              DELETE FROM student_answers
+              WHERE attempt_id = ?
+            `
+          ).run(attemptId);
+
+          const insertStudentAnswer =
+            db.prepare(
+              `
+                INSERT INTO student_answers (
+                  attempt_id,
+                  question_id,
+                  answer_id,
+                  is_correct
+                )
+                VALUES (?, ?, ?, ?)
+              `
+            );
+
+          for (
+            const question of
+            attemptQuestions
+          ) {
+            const questionId = Number(
+              question.id
+            );
+
+            const questionPoints =
+              Number(
+                question.points || 0
+              );
+
+            maximumScore +=
+              questionPoints;
+
+            const selectedAnswerIds =
+              answersByQuestion.get(
+                questionId
+              ) || [];
+
+            const questionAnswers = db
+              .prepare(
+                `
+                  SELECT
+                    id,
+                    is_correct
+                  FROM answers
+                  WHERE question_id = ?
+                `
+              )
+              .all(questionId);
+
+            const validAnswerIds =
+              questionAnswers.map(
+                (answer) =>
+                  Number(answer.id)
+              );
+
+            const invalidAnswer =
+              selectedAnswerIds.some(
+                (answerId) =>
+                  !validAnswerIds.includes(
+                    answerId
+                  )
+              );
+
+            if (invalidAnswer) {
+              throw new Error(
+                `Une réponse sélectionnée n’appartient pas à la question ${questionId}`
+              );
+            }
+
+            const correctAnswerIds =
+              questionAnswers
+                .filter(
+                  (answer) =>
+                    Number(
+                      answer.is_correct
+                    ) === 1
+                )
+                .map((answer) =>
+                  Number(answer.id)
+                );
+
+            /*
+             * La sélection doit être exactement identique
+             * à l’ensemble des bonnes réponses.
+             */
+            const questionIsCorrect =
+              haveSameIds(
+                selectedAnswerIds,
+                correctAnswerIds
+              );
+
+            if (questionIsCorrect) {
+              obtainedScore +=
+                questionPoints;
+
+              correctQuestions += 1;
+            }
+
+            /*
+             * Chaque réponse sélectionnée est enregistrée.
+             */
+            for (
+              const answerId of
+              selectedAnswerIds
+            ) {
+              insertStudentAnswer.run(
+                attemptId,
+                questionId,
+                answerId,
+                questionIsCorrect ? 1 : 0
+              );
+            }
+
+            details.push({
+              question_id: questionId,
+              question_type:
+                question.question_type,
+              selected_answer_ids:
+                selectedAnswerIds,
+              is_correct:
+                questionIsCorrect,
+              points_obtained:
+                questionIsCorrect
+                  ? questionPoints
+                  : 0,
+              maximum_points:
+                questionPoints,
+            });
+          }
+
+          const percentage =
+            maximumScore > 0
+              ? Number(
+                  (
+                    (obtainedScore /
+                      maximumScore) *
+                    100
+                  ).toFixed(2)
+                )
+              : 0;
+
+          const validationStatus =
+            percentage >=
+            Number(
+              attempt.success_percentage ||
+                0
+            )
+              ? "passed"
+              : "failed";
+
+          const finalStatus =
+            automatic
+              ? "expired"
+              : "submitted";
+
+          db.prepare(
+            `
+              UPDATE exam_attempts
+              SET
+                end_time = CURRENT_TIMESTAMP,
+                status = ?,
+                score = ?,
+                percentage = ?,
+                validation_status = ?
+              WHERE id = ?
+            `
+          ).run(
+            finalStatus,
+            obtainedScore,
+            percentage,
+            validationStatus,
+            attemptId
+          );
+
+          return {
+            percentage,
+            validationStatus,
+            finalStatus,
+          };
+        });
+
+      const correctionResult =
+        submitTransaction();
+
+      return res.json({
+        success: true,
+
+        message: automatic
+          ? "Temps écoulé : examen soumis automatiquement"
+          : "Examen soumis avec succès",
+
+        attempt_id: attemptId,
+        status:
+          correctionResult.finalStatus,
+
+        score: obtainedScore,
+        maximum_score: maximumScore,
+
+        percentage:
+          correctionResult.percentage,
+
+        validation_status:
+          correctionResult.validationStatus,
+
+        correct_questions:
+          correctQuestions,
+
+        total_questions:
+          attemptQuestions.length,
+
+        cheating_detected: 0,
+
+        exam: {
+          id: attempt.exam_id,
+          title: attempt.exam_title,
+          success_percentage:
+            attempt.success_percentage,
+        },
+
+        details,
+      });
+    } catch (error) {
+      console.error(
+        "POST /student/submit-exam :",
+        error
+      );
+
+      const isValidationError =
+        String(error.message).includes(
+          "n’appartient pas à la question"
+        );
+
+      return res
+        .status(
+          isValidationError ? 400 : 500
+        )
+        .json({
+          success: false,
+          message:
+            error.message ||
+            "Erreur pendant la soumission de l’examen",
+        });
+    }
+  }
+);
+
 export default router;
