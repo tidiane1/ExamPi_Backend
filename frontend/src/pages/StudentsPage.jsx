@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+
 import {
   Alert,
   Box,
@@ -21,33 +22,61 @@ import {
   Typography,
 } from "@mui/material";
 
+import CancelIcon from "@mui/icons-material/Cancel";
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import SaveIcon from "@mui/icons-material/Save";
-import CancelIcon from "@mui/icons-material/Cancel";
-import PowerSettingsNewIcon from "@mui/icons-material/PowerSettingsNew";
 
 import api from "../api/api";
 
 function StudentsPage() {
   const [students, setStudents] = useState([]);
 
-  const [page, setPage] = useState(0);
-  const [rowsPerPage, setRowsPerPage] = useState(5);
-
   const [form, setForm] = useState({
+    first_name: "",
+    last_name: "",
+    phone: "",
+    email: "",
+  });
+
+  const [editingId, setEditingId] = useState(null);
+
+  const [editForm, setEditForm] = useState({
     matricule: "",
     first_name: "",
     last_name: "",
+    phone: "",
+    email: "",
     secret_code: "",
     is_active: 1,
   });
 
-  const [editingId, setEditingId] = useState(null);
-  const [editForm, setEditForm] = useState({});
+  const [csvFile, setCsvFile] = useState(null);
+  const [importing, setImporting] = useState(false);
+
+  const [search, setSearch] = useState("");
+
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(5);
 
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+
+  const resetMessages = () => {
+    setMessage("");
+    setError("");
+  };
+
+  const loadStudents = async () => {
+    try {
+      const response = await api.get("/admin/students");
+
+      setStudents(response.data.students || []);
+    } catch (err) {
+      setError("Erreur pendant le chargement des étudiants");
+      console.error(err);
+    }
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -75,56 +104,41 @@ function StudentsPage() {
     };
   }, []);
 
-  const loadStudents = async () => {
-    try {
-      const response = await api.get("/admin/students");
-      setStudents(response.data.students || []);
-    } catch (err) {
-      setError("Erreur pendant le rechargement des étudiants");
-      console.error(err);
-    }
-  };
-
-  const resetMessages = () => {
-    setMessage("");
-    setError("");
-  };
-
-  const handleFormChange = (e) => {
+  const handleFormChange = (event) => {
     setForm({
       ...form,
-      [e.target.name]: e.target.value,
+      [event.target.name]: event.target.value,
     });
   };
 
-  const handleCreate = async (e) => {
-    e.preventDefault();
+  const handleCreate = async (event) => {
+    event.preventDefault();
+
     resetMessages();
 
-    if (
-      !form.matricule.trim() ||
-      !form.first_name.trim() ||
-      !form.last_name.trim() ||
-      !form.secret_code.trim()
-    ) {
-      setError("Tous les champs sont obligatoires");
+    if (!form.first_name.trim() || !form.last_name.trim()) {
+      setError("Le prénom et le nom sont obligatoires");
       return;
     }
 
     try {
-      await api.post("/admin/students", {
-        ...form,
-        is_active: Number(form.is_active),
+      const response = await api.post("/admin/students", {
+        first_name: form.first_name,
+        last_name: form.last_name,
+        phone: form.phone,
+        email: form.email,
       });
 
-      setMessage("Étudiant ajouté avec succès");
+      setMessage(
+        response.data.message ||
+          "Étudiant ajouté avec succès. Matricule et code secret générés automatiquement."
+      );
 
       setForm({
-        matricule: "",
         first_name: "",
         last_name: "",
-        secret_code: "",
-        is_active: 1,
+        phone: "",
+        email: "",
       });
 
       await loadStudents();
@@ -132,8 +146,52 @@ function StudentsPage() {
     } catch (err) {
       setError(
         err.response?.data?.message ||
-          "Erreur pendant la création de l’étudiant"
+          "Erreur pendant l’ajout de l’étudiant"
       );
+    }
+  };
+
+  const handleImportCsv = async () => {
+    resetMessages();
+
+    if (!csvFile) {
+      setError("Veuillez sélectionner un fichier CSV");
+      return;
+    }
+
+    try {
+      setImporting(true);
+
+      const formData = new FormData();
+      formData.append("file", csvFile);
+
+      const response = await api.post(
+        "/admin/students/import-csv",
+        formData,
+        {
+          headers: {
+            "Content-Type": "multipart/form-data",
+          },
+        }
+      );
+
+      setMessage(
+        `${response.data.message}. Ignorés : ${
+          response.data.skipped_count || 0
+        }`
+      );
+
+      setCsvFile(null);
+
+      await loadStudents();
+      setPage(0);
+    } catch (err) {
+      setError(
+        err.response?.data?.message ||
+          "Erreur pendant l’importation du fichier CSV"
+      );
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -141,24 +199,36 @@ function StudentsPage() {
     resetMessages();
 
     setEditingId(student.id);
+
     setEditForm({
-      matricule: student.matricule,
-      first_name: student.first_name,
-      last_name: student.last_name,
-      secret_code: student.secret_code,
-      is_active: student.is_active,
+      matricule: student.matricule || "",
+      first_name: student.first_name || "",
+      last_name: student.last_name || "",
+      phone: student.phone || "",
+      email: student.email || "",
+      secret_code: student.secret_code || "",
+      is_active: Number(student.is_active) === 1 ? 1 : 0,
     });
   };
 
   const cancelEdit = () => {
     setEditingId(null);
-    setEditForm({});
+
+    setEditForm({
+      matricule: "",
+      first_name: "",
+      last_name: "",
+      phone: "",
+      email: "",
+      secret_code: "",
+      is_active: 1,
+    });
   };
 
-  const handleEditChange = (e) => {
+  const handleEditChange = (event) => {
     setEditForm({
       ...editForm,
-      [e.target.name]: e.target.value,
+      [event.target.name]: event.target.value,
     });
   };
 
@@ -166,22 +236,28 @@ function StudentsPage() {
     resetMessages();
 
     if (
-      !editForm.matricule?.trim() ||
-      !editForm.first_name?.trim() ||
-      !editForm.last_name?.trim() ||
-      !editForm.secret_code?.trim()
+      !editForm.matricule.trim() ||
+      !editForm.first_name.trim() ||
+      !editForm.last_name.trim() ||
+      !editForm.secret_code.trim()
     ) {
-      setError("Tous les champs sont obligatoires");
+      setError("Matricule, prénom, nom et code secret sont obligatoires");
       return;
     }
 
     try {
-      await api.put(`/admin/students/${id}`, {
-        ...editForm,
+      const response = await api.put(`/admin/students/${id}`, {
+        matricule: editForm.matricule,
+        first_name: editForm.first_name,
+        last_name: editForm.last_name,
+        phone: editForm.phone,
+        email: editForm.email,
+        secret_code: editForm.secret_code,
         is_active: Number(editForm.is_active),
       });
 
-      setMessage("Étudiant modifié avec succès");
+      setMessage(response.data.message || "Étudiant modifié avec succès");
+
       cancelEdit();
       await loadStudents();
     } catch (err) {
@@ -192,12 +268,14 @@ function StudentsPage() {
     }
   };
 
-  const handleToggle = async (id) => {
+  const handleToggleStatus = async (id) => {
     resetMessages();
 
     try {
-      await api.patch(`/admin/students/${id}/toggle`);
-      setMessage("Statut modifié avec succès");
+      const response = await api.patch(`/admin/students/${id}/toggle`);
+
+      setMessage(response.data.message || "Statut modifié avec succès");
+
       await loadStudents();
     } catch (err) {
       setError(
@@ -210,20 +288,24 @@ function StudentsPage() {
   const handleDelete = async (id) => {
     resetMessages();
 
-    const confirmDelete = window.confirm(
-      "Voulez-vous vraiment supprimer cet étudiant ?"
+    const confirmed = window.confirm(
+      "Voulez-vous vraiment supprimer cet étudiant ? Cette action supprimera aussi ses tentatives et résultats."
     );
 
-    if (!confirmDelete) return;
+    if (!confirmed) return;
 
     try {
-      await api.delete(`/admin/students/${id}`);
+      const response = await api.delete(`/admin/students/${id}`);
 
-      setMessage("Étudiant supprimé avec succès");
+      setMessage(response.data.message || "Étudiant supprimé avec succès");
+
       await loadStudents();
 
       const remainingItems = students.length - 1;
-      const maxPage = Math.max(0, Math.ceil(remainingItems / rowsPerPage) - 1);
+      const maxPage = Math.max(
+        0,
+        Math.ceil(remainingItems / rowsPerPage) - 1
+      );
 
       if (page > maxPage) {
         setPage(maxPage);
@@ -236,29 +318,67 @@ function StudentsPage() {
     }
   };
 
+  const filteredStudents = useMemo(() => {
+    const keyword = search.trim().toLowerCase();
+
+    if (!keyword) {
+      return students;
+    }
+
+    return students.filter((student) => {
+      return (
+        String(student.matricule || "")
+          .toLowerCase()
+          .includes(keyword) ||
+        String(student.first_name || "")
+          .toLowerCase()
+          .includes(keyword) ||
+        String(student.last_name || "")
+          .toLowerCase()
+          .includes(keyword) ||
+        String(student.phone || "")
+          .toLowerCase()
+          .includes(keyword) ||
+        String(student.email || "")
+          .toLowerCase()
+          .includes(keyword) ||
+        String(student.secret_code || "")
+          .toLowerCase()
+          .includes(keyword)
+      );
+    });
+  }, [students, search]);
+
+  const paginatedStudents = filteredStudents.slice(
+    page * rowsPerPage,
+    page * rowsPerPage + rowsPerPage
+  );
+
   const handleChangePage = (event, newPage) => {
     setPage(newPage);
   };
 
   const handleChangeRowsPerPage = (event) => {
-    setRowsPerPage(parseInt(event.target.value, 10));
+    setRowsPerPage(Number(event.target.value));
     setPage(0);
   };
 
-  const paginatedStudents = students.slice(
-    page * rowsPerPage,
-    page * rowsPerPage + rowsPerPage
-  );
-
   return (
-    <Box sx={{ width: "100%", maxWidth: "100%", overflowX: "hidden" }}>
+    <Box
+      sx={{
+        width: "100%",
+        maxWidth: "100%",
+        overflowX: "hidden",
+        boxSizing: "border-box",
+      }}
+    >
       <Typography variant="h4" fontWeight={700} gutterBottom>
-        Gestion des étudiants autorisés
+        Gestion des étudiants
       </Typography>
 
       <Typography color="text.secondary" sx={{ mb: 3 }}>
-        Ajouter, modifier, bloquer ou autoriser les étudiants qui peuvent passer
-        les examens.
+        Ajouter manuellement des étudiants, importer un fichier CSV, générer
+        automatiquement les matricules et codes secrets, puis gérer les accès.
       </Typography>
 
       {message && (
@@ -276,64 +396,58 @@ function StudentsPage() {
       <Paper
         sx={{
           p: 3,
-          mb: 4,
-          width: "100%",
-          maxWidth: 900,
+          mb: 3,
           borderRadius: 3,
+          maxWidth: 1000,
           mx: "auto",
-          boxSizing: "border-box",
         }}
       >
         <Typography variant="h6" fontWeight={700} gutterBottom>
           Ajouter un étudiant
         </Typography>
 
+        <Typography color="text.secondary" sx={{ mb: 2 }}>
+          Le matricule et le code secret seront générés automatiquement.
+        </Typography>
+
         <Box component="form" onSubmit={handleCreate}>
           <Stack spacing={2}>
-            <TextField
-              name="matricule"
-              label="Matricule"
-              fullWidth
-              value={form.matricule}
-              onChange={handleFormChange}
-            />
-
-            <TextField
-              name="first_name"
-              label="Prénom"
-              fullWidth
-              value={form.first_name}
-              onChange={handleFormChange}
-            />
-
-            <TextField
-              name="last_name"
-              label="Nom"
-              fullWidth
-              value={form.last_name}
-              onChange={handleFormChange}
-            />
-
-            <TextField
-              name="secret_code"
-              label="Code secret"
-              fullWidth
-              value={form.secret_code}
-              onChange={handleFormChange}
-            />
-
-            <FormControl fullWidth>
-              <InputLabel>Statut</InputLabel>
-              <Select
-                name="is_active"
-                label="Statut"
-                value={form.is_active}
+            <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+              <TextField
+                name="last_name"
+                label="Nom"
+                fullWidth
+                value={form.last_name}
                 onChange={handleFormChange}
-              >
-                <MenuItem value={1}>Autorisé</MenuItem>
-                <MenuItem value={0}>Bloqué</MenuItem>
-              </Select>
-            </FormControl>
+              />
+
+              <TextField
+                name="first_name"
+                label="Prénom"
+                fullWidth
+                value={form.first_name}
+                onChange={handleFormChange}
+              />
+            </Stack>
+
+            <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+              <TextField
+                name="phone"
+                label="Téléphone"
+                fullWidth
+                value={form.phone}
+                onChange={handleFormChange}
+              />
+
+              <TextField
+                name="email"
+                label="Email"
+                type="email"
+                fullWidth
+                value={form.email}
+                onChange={handleFormChange}
+              />
+            </Stack>
 
             <Button type="submit" variant="contained" size="large">
               Ajouter l’étudiant
@@ -345,24 +459,101 @@ function StudentsPage() {
       <Paper
         sx={{
           p: 3,
+          mb: 3,
+          borderRadius: 3,
+          maxWidth: 1000,
+          mx: "auto",
+        }}
+      >
+        <Typography variant="h6" fontWeight={700} gutterBottom>
+          Importer des étudiants par CSV
+        </Typography>
+
+        <Typography color="text.secondary" sx={{ mb: 2 }}>
+          Le fichier CSV doit contenir les colonnes : nom, prenom, telephone,
+          email.
+        </Typography>
+
+        <Stack
+          direction={{ xs: "column", sm: "row" }}
+          spacing={2}
+          alignItems={{ xs: "stretch", sm: "center" }}
+        >
+          <Button variant="outlined" component="label">
+            Choisir un fichier CSV
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              hidden
+              onChange={(event) => {
+                setCsvFile(event.target.files?.[0] || null);
+              }}
+            />
+          </Button>
+
+          <Typography sx={{ flex: 1 }}>
+            {csvFile ? csvFile.name : "Aucun fichier sélectionné"}
+          </Typography>
+
+          <Button
+            variant="contained"
+            disabled={!csvFile || importing}
+            onClick={handleImportCsv}
+          >
+            {importing ? "Importation..." : "Importer"}
+          </Button>
+        </Stack>
+      </Paper>
+
+      <Paper
+        sx={{
+          p: 3,
           width: "100%",
           maxWidth: "100%",
           borderRadius: 3,
           overflow: "hidden",
+          boxSizing: "border-box",
         }}
       >
-        <Typography variant="h6" fontWeight={700} gutterBottom>
-          Liste des étudiants
-        </Typography>
+        <Stack
+          direction={{ xs: "column", md: "row" }}
+          justifyContent="space-between"
+          alignItems={{ xs: "stretch", md: "center" }}
+          spacing={2}
+          sx={{ mb: 2 }}
+        >
+          <Box>
+            <Typography variant="h6" fontWeight={700}>
+              Liste des étudiants
+            </Typography>
+
+            <Typography color="text.secondary">
+              {filteredStudents.length} étudiant(s) trouvé(s)
+            </Typography>
+          </Box>
+
+          <TextField
+            label="Rechercher"
+            placeholder="Matricule, nom, prénom, téléphone, email..."
+            value={search}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              setPage(0);
+            }}
+            sx={{ minWidth: { xs: "100%", md: 420 } }}
+          />
+        </Stack>
 
         <Box sx={{ width: "100%", overflowX: "auto" }}>
-          <Table sx={{ minWidth: 1100 }}>
+          <Table sx={{ minWidth: 1250 }}>
             <TableHead>
               <TableRow>
                 <TableCell>ID</TableCell>
                 <TableCell>Matricule</TableCell>
-                <TableCell>Prénom</TableCell>
                 <TableCell>Nom</TableCell>
+                <TableCell>Prénom</TableCell>
+                <TableCell>Téléphone</TableCell>
+                <TableCell>Email</TableCell>
                 <TableCell>Code secret</TableCell>
                 <TableCell>Statut</TableCell>
                 <TableCell>Date création</TableCell>
@@ -371,147 +562,183 @@ function StudentsPage() {
             </TableHead>
 
             <TableBody>
-              {paginatedStudents.map((student) => (
-                <TableRow key={student.id}>
-                  <TableCell>{student.id}</TableCell>
+              {paginatedStudents.map((student) => {
+                const isEditing = editingId === student.id;
 
-                  <TableCell>
-                    {editingId === student.id ? (
-                      <TextField
-                        name="matricule"
-                        size="small"
-                        value={editForm.matricule || ""}
-                        onChange={handleEditChange}
-                      />
-                    ) : (
-                      student.matricule
-                    )}
-                  </TableCell>
+                return (
+                  <TableRow key={student.id}>
+                    <TableCell>{student.id}</TableCell>
 
-                  <TableCell>
-                    {editingId === student.id ? (
-                      <TextField
-                        name="first_name"
-                        size="small"
-                        value={editForm.first_name || ""}
-                        onChange={handleEditChange}
-                      />
-                    ) : (
-                      student.first_name
-                    )}
-                  </TableCell>
-
-                  <TableCell>
-                    {editingId === student.id ? (
-                      <TextField
-                        name="last_name"
-                        size="small"
-                        value={editForm.last_name || ""}
-                        onChange={handleEditChange}
-                      />
-                    ) : (
-                      student.last_name
-                    )}
-                  </TableCell>
-
-                  <TableCell>
-                    {editingId === student.id ? (
-                      <TextField
-                        name="secret_code"
-                        size="small"
-                        value={editForm.secret_code || ""}
-                        onChange={handleEditChange}
-                      />
-                    ) : (
-                      student.secret_code
-                    )}
-                  </TableCell>
-
-                  <TableCell>
-                    {editingId === student.id ? (
-                      <FormControl size="small" sx={{ minWidth: 130 }}>
-                        <Select
-                          name="is_active"
-                          value={editForm.is_active ?? 1}
+                    <TableCell>
+                      {isEditing ? (
+                        <TextField
+                          name="matricule"
+                          size="small"
+                          value={editForm.matricule}
                           onChange={handleEditChange}
-                        >
-                          <MenuItem value={1}>Autorisé</MenuItem>
-                          <MenuItem value={0}>Bloqué</MenuItem>
-                        </Select>
-                      </FormControl>
-                    ) : student.is_active === 1 ? (
-                      <Chip label="Autorisé" color="success" size="small" />
-                    ) : (
-                      <Chip label="Bloqué" color="error" size="small" />
-                    )}
-                  </TableCell>
-
-                  <TableCell>{student.created_at}</TableCell>
-
-                  <TableCell align="right">
-                    <Box
-                      sx={{
-                        display: "flex",
-                        justifyContent: "flex-end",
-                        gap: 1,
-                      }}
-                    >
-                      {editingId === student.id ? (
-                        <>
-                          <IconButton
-                            color="success"
-                            onClick={() => handleUpdate(student.id)}
-                          >
-                            <SaveIcon />
-                          </IconButton>
-
-                          <IconButton color="warning" onClick={cancelEdit}>
-                            <CancelIcon />
-                          </IconButton>
-                        </>
+                          sx={{ minWidth: 140 }}
+                        />
                       ) : (
-                        <>
-                          <IconButton
-                            color="primary"
-                            onClick={() => startEdit(student)}
-                          >
-                            <EditIcon />
-                          </IconButton>
-
-                          <IconButton
-                            color={
-                              student.is_active === 1 ? "warning" : "success"
-                            }
-                            onClick={() => handleToggle(student.id)}
-                          >
-                            <PowerSettingsNewIcon />
-                          </IconButton>
-
-                          <IconButton
-                            color="error"
-                            onClick={() => handleDelete(student.id)}
-                          >
-                            <DeleteIcon />
-                          </IconButton>
-                        </>
+                        student.matricule
                       )}
-                    </Box>
-                  </TableCell>
-                </TableRow>
-              ))}
+                    </TableCell>
 
-              {students.length === 0 && (
+                    <TableCell>
+                      {isEditing ? (
+                        <TextField
+                          name="last_name"
+                          size="small"
+                          value={editForm.last_name}
+                          onChange={handleEditChange}
+                          sx={{ minWidth: 140 }}
+                        />
+                      ) : (
+                        student.last_name
+                      )}
+                    </TableCell>
+
+                    <TableCell>
+                      {isEditing ? (
+                        <TextField
+                          name="first_name"
+                          size="small"
+                          value={editForm.first_name}
+                          onChange={handleEditChange}
+                          sx={{ minWidth: 140 }}
+                        />
+                      ) : (
+                        student.first_name
+                      )}
+                    </TableCell>
+
+                    <TableCell>
+                      {isEditing ? (
+                        <TextField
+                          name="phone"
+                          size="small"
+                          value={editForm.phone}
+                          onChange={handleEditChange}
+                          sx={{ minWidth: 140 }}
+                        />
+                      ) : (
+                        student.phone || "-"
+                      )}
+                    </TableCell>
+
+                    <TableCell>
+                      {isEditing ? (
+                        <TextField
+                          name="email"
+                          type="email"
+                          size="small"
+                          value={editForm.email}
+                          onChange={handleEditChange}
+                          sx={{ minWidth: 220 }}
+                        />
+                      ) : (
+                        student.email || "-"
+                      )}
+                    </TableCell>
+
+                    <TableCell>
+                      {isEditing ? (
+                        <TextField
+                          name="secret_code"
+                          size="small"
+                          value={editForm.secret_code}
+                          onChange={handleEditChange}
+                          sx={{ minWidth: 120 }}
+                        />
+                      ) : (
+                        student.secret_code
+                      )}
+                    </TableCell>
+
+                    <TableCell>
+                      {isEditing ? (
+                        <FormControl size="small" sx={{ minWidth: 130 }}>
+                          <InputLabel>Statut</InputLabel>
+
+                          <Select
+                            name="is_active"
+                            label="Statut"
+                            value={editForm.is_active}
+                            onChange={handleEditChange}
+                          >
+                            <MenuItem value={1}>Actif</MenuItem>
+                            <MenuItem value={0}>Inactif</MenuItem>
+                          </Select>
+                        </FormControl>
+                      ) : Number(student.is_active) === 1 ? (
+                        <Chip label="Actif" color="success" size="small" />
+                      ) : (
+                        <Chip label="Inactif" color="error" size="small" />
+                      )}
+                    </TableCell>
+
+                    <TableCell>{student.created_at || "-"}</TableCell>
+
+                    <TableCell align="right">
+                      <Stack
+                        direction="row"
+                        spacing={1}
+                        justifyContent="flex-end"
+                      >
+                        {isEditing ? (
+                          <>
+                            <IconButton
+                              color="success"
+                              onClick={() => handleUpdate(student.id)}
+                            >
+                              <SaveIcon />
+                            </IconButton>
+
+                            <IconButton color="warning" onClick={cancelEdit}>
+                              <CancelIcon />
+                            </IconButton>
+                          </>
+                        ) : (
+                          <>
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              color={
+                                Number(student.is_active) === 1
+                                  ? "warning"
+                                  : "success"
+                              }
+                              onClick={() => handleToggleStatus(student.id)}
+                            >
+                              {Number(student.is_active) === 1
+                                ? "Désactiver"
+                                : "Activer"}
+                            </Button>
+
+                            <IconButton
+                              color="primary"
+                              onClick={() => startEdit(student)}
+                            >
+                              <EditIcon />
+                            </IconButton>
+
+                            <IconButton
+                              color="error"
+                              onClick={() => handleDelete(student.id)}
+                            >
+                              <DeleteIcon />
+                            </IconButton>
+                          </>
+                        )}
+                      </Stack>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+
+              {paginatedStudents.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={8} align="center">
+                  <TableCell colSpan={10} align="center">
                     Aucun étudiant trouvé
-                  </TableCell>
-                </TableRow>
-              )}
-
-              {students.length > 0 && paginatedStudents.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={8} align="center">
-                    Aucun étudiant sur cette page
                   </TableCell>
                 </TableRow>
               )}
@@ -521,12 +748,12 @@ function StudentsPage() {
 
         <TablePagination
           component="div"
-          count={students.length}
+          count={filteredStudents.length}
           page={page}
           onPageChange={handleChangePage}
           rowsPerPage={rowsPerPage}
           onRowsPerPageChange={handleChangeRowsPerPage}
-          rowsPerPageOptions={[5, 10, 25]}
+          rowsPerPageOptions={[5, 10, 25, 50]}
           labelRowsPerPage="Lignes par page"
           labelDisplayedRows={({ from, to, count }) =>
             `${from}-${to} sur ${count !== -1 ? count : `plus de ${to}`}`
