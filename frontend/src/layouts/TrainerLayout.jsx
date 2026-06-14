@@ -64,9 +64,6 @@ function TrainerLayout() {
           <ListItemButton component={Link} to="/trainer/exams">
             <ListItemText primary="Examens" />
           </ListItemButton>
-          <ListItemButton component={Link} to="/trainer/students">
-            <ListItemText primary="Étudiants" />
-          </ListItemButton>
           <ListItemButton component={Link} to="/trainer/questions">
             <ListItemText primary="Questions" />
           </ListItemButton>

@@ -1299,4 +1299,476 @@ router.post(
   }
 );
 
+/**
+ * DELETE /api/admin/students/delete-many
+ *
+ * Supprimer plusieurs étudiants et toutes les données
+ * directement associées à leurs tentatives.
+ *
+ * Cette route doit être placée avant :
+ * DELETE /api/admin/students/:id
+ */
+router.delete(
+  "/admin/students/delete-many",
+  (req, res) => {
+    try {
+      const receivedIds = req.body?.ids;
+
+      if (
+        !Array.isArray(receivedIds) ||
+        receivedIds.length === 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Veuillez sélectionner au moins un étudiant",
+        });
+      }
+
+      /*
+       * Conversion en nombres, suppression des valeurs
+       * invalides et suppression des doublons.
+       */
+      const requestedStudentIds = [
+        ...new Set(
+          receivedIds
+            .map(Number)
+            .filter(
+              (id) =>
+                Number.isInteger(id) &&
+                id > 0
+            )
+        ),
+      ];
+
+      if (requestedStudentIds.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Aucun identifiant étudiant valide",
+        });
+      }
+
+      const requestedPlaceholders =
+        requestedStudentIds
+          .map(() => "?")
+          .join(", ");
+
+      /*
+       * Vérifier les étudiants réellement présents.
+       */
+      const existingStudents = db
+        .prepare(
+          `
+            SELECT
+              id,
+              matricule,
+              first_name,
+              last_name
+            FROM students
+            WHERE id IN (${requestedPlaceholders})
+          `
+        )
+        .all(...requestedStudentIds);
+
+      if (existingStudents.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "Aucun étudiant sélectionné n’a été trouvé",
+        });
+      }
+
+      const studentIds = existingStudents.map(
+        (student) => Number(student.id)
+      );
+
+      const placeholders = studentIds
+        .map(() => "?")
+        .join(", ");
+
+      /*
+       * Transaction SQLite :
+       * si une suppression échoue, tout est annulé.
+       */
+      const deleteStudentsTransaction =
+        db.transaction((ids) => {
+          /*
+           * 1. Événements de sécurité.
+           */
+          const securityEventsResult = db
+            .prepare(
+              `
+                DELETE FROM security_events
+                WHERE attempt_id IN (
+                  SELECT id
+                  FROM exam_attempts
+                  WHERE student_id IN (${placeholders})
+                )
+              `
+            )
+            .run(...ids);
+
+          /*
+           * 2. Réponses données par les étudiants.
+           */
+          const studentAnswersResult = db
+            .prepare(
+              `
+                DELETE FROM student_answers
+                WHERE attempt_id IN (
+                  SELECT id
+                  FROM exam_attempts
+                  WHERE student_id IN (${placeholders})
+                )
+              `
+            )
+            .run(...ids);
+
+          /*
+           * 3. Questions associées aux tentatives.
+           */
+          const attemptQuestionsResult = db
+            .prepare(
+              `
+                DELETE FROM attempt_questions
+                WHERE attempt_id IN (
+                  SELECT id
+                  FROM exam_attempts
+                  WHERE student_id IN (${placeholders})
+                )
+              `
+            )
+            .run(...ids);
+
+          /*
+           * 4. Tentatives des étudiants.
+           */
+          const attemptsResult = db
+            .prepare(
+              `
+                DELETE FROM exam_attempts
+                WHERE student_id IN (${placeholders})
+              `
+            )
+            .run(...ids);
+
+          /*
+           * 5. Étudiants.
+           */
+          const studentsResult = db
+            .prepare(
+              `
+                DELETE FROM students
+                WHERE id IN (${placeholders})
+              `
+            )
+            .run(...ids);
+
+          return {
+            deletedSecurityEvents:
+              securityEventsResult.changes,
+
+            deletedStudentAnswers:
+              studentAnswersResult.changes,
+
+            deletedAttemptQuestions:
+              attemptQuestionsResult.changes,
+
+            deletedAttempts:
+              attemptsResult.changes,
+
+            deletedStudents:
+              studentsResult.changes,
+          };
+        });
+
+      const deletionResult =
+        deleteStudentsTransaction(studentIds);
+
+      return res.status(200).json({
+        success: true,
+
+        message:
+          `${deletionResult.deletedStudents} étudiant(s) supprimé(s) avec succès`,
+
+        count:
+          deletionResult.deletedStudents,
+
+        deleted_ids: studentIds,
+
+        details: deletionResult,
+      });
+    } catch (error) {
+      console.error(
+        "DELETE /admin/students/delete-many :",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Erreur pendant la suppression des étudiants",
+        error: error.message,
+      });
+    }
+  }
+);
+/**
+ * DELETE /api/admin/students/delete-many
+ * Supprimer plusieurs étudiants et leurs données associées
+ *
+ * IMPORTANT :
+ * Cette route doit être placée avant :
+ * router.delete("/admin/students/:id", ...)
+ */
+router.delete("/admin/students/delete-many", (req, res) => {
+  try {
+    const receivedIds = req.body?.ids;
+
+    if (!Array.isArray(receivedIds) || receivedIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Veuillez sélectionner au moins un étudiant",
+      });
+    }
+
+    const studentIds = [
+      ...new Set(
+        receivedIds
+          .map(Number)
+          .filter((id) => Number.isInteger(id) && id > 0)
+      ),
+    ];
+
+    if (studentIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Aucun identifiant étudiant valide",
+      });
+    }
+
+    const placeholders = studentIds.map(() => "?").join(", ");
+
+    const existingStudents = db
+      .prepare(`
+        SELECT
+          id,
+          matricule,
+          first_name,
+          last_name
+        FROM students
+        WHERE id IN (${placeholders})
+      `)
+      .all(...studentIds);
+
+    if (existingStudents.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Aucun étudiant sélectionné n’a été trouvé",
+      });
+    }
+
+    const existingStudentIds = existingStudents.map((student) =>
+      Number(student.id)
+    );
+
+    const existingPlaceholders = existingStudentIds
+      .map(() => "?")
+      .join(", ");
+
+    const deleteTransaction = db.transaction(() => {
+      const attempts = db
+        .prepare(`
+          SELECT id
+          FROM exam_attempts
+          WHERE student_id IN (${existingPlaceholders})
+        `)
+        .all(...existingStudentIds);
+
+      const deleteStudentAnswers = db.prepare(`
+        DELETE FROM student_answers
+        WHERE attempt_id = ?
+      `);
+
+      const deleteSecurityEvents = db.prepare(`
+        DELETE FROM security_events
+        WHERE attempt_id = ?
+      `);
+
+      const deleteAttemptQuestions = db.prepare(`
+        DELETE FROM attempt_questions
+        WHERE attempt_id = ?
+      `);
+
+      attempts.forEach((attempt) => {
+        deleteStudentAnswers.run(attempt.id);
+        deleteSecurityEvents.run(attempt.id);
+        deleteAttemptQuestions.run(attempt.id);
+      });
+
+      const attemptsResult = db
+        .prepare(`
+          DELETE FROM exam_attempts
+          WHERE student_id IN (${existingPlaceholders})
+        `)
+        .run(...existingStudentIds);
+
+      const studentsResult = db
+        .prepare(`
+          DELETE FROM students
+          WHERE id IN (${existingPlaceholders})
+        `)
+        .run(...existingStudentIds);
+
+      return {
+        attemptsDeleted: attemptsResult.changes,
+        studentsDeleted: studentsResult.changes,
+      };
+    });
+
+    const result = deleteTransaction();
+
+    return res.json({
+      success: true,
+      message: `${result.studentsDeleted} étudiant(s) supprimé(s) avec succès`,
+      count: result.studentsDeleted,
+      deleted_ids: existingStudentIds,
+      attempts_deleted: result.attemptsDeleted,
+    });
+  } catch (error) {
+    console.error(
+      "DELETE /admin/students/delete-many :",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Erreur pendant la suppression des étudiants",
+      error: error.message,
+    });
+  }
+});
+/**
+ * DELETE /api/admin/students/:id
+ *
+ * Supprimer un étudiant et les données associées
+ * à ses tentatives.
+ */
+router.delete(
+  "/admin/students/:id",
+  (req, res) => {
+    try {
+      const studentId = Number(req.params.id);
+
+      if (
+        !Number.isInteger(studentId) ||
+        studentId <= 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Identifiant étudiant invalide",
+        });
+      }
+
+      const student = db
+        .prepare(
+          `
+            SELECT
+              id,
+              matricule,
+              first_name,
+              last_name
+            FROM students
+            WHERE id = ?
+          `
+        )
+        .get(studentId);
+
+      if (!student) {
+        return res.status(404).json({
+          success: false,
+          message: "Étudiant introuvable",
+        });
+      }
+
+      const deleteStudentTransaction =
+        db.transaction((id) => {
+          db.prepare(
+            `
+              DELETE FROM security_events
+              WHERE attempt_id IN (
+                SELECT id
+                FROM exam_attempts
+                WHERE student_id = ?
+              )
+            `
+          ).run(id);
+
+          db.prepare(
+            `
+              DELETE FROM student_answers
+              WHERE attempt_id IN (
+                SELECT id
+                FROM exam_attempts
+                WHERE student_id = ?
+              )
+            `
+          ).run(id);
+
+          db.prepare(
+            `
+              DELETE FROM attempt_questions
+              WHERE attempt_id IN (
+                SELECT id
+                FROM exam_attempts
+                WHERE student_id = ?
+              )
+            `
+          ).run(id);
+
+          db.prepare(
+            `
+              DELETE FROM exam_attempts
+              WHERE student_id = ?
+            `
+          ).run(id);
+
+          return db
+            .prepare(
+              `
+                DELETE FROM students
+                WHERE id = ?
+              `
+            )
+            .run(id);
+        });
+
+      const result =
+        deleteStudentTransaction(studentId);
+
+      return res.status(200).json({
+        success: true,
+        message:
+          "Étudiant supprimé avec succès",
+        studentId,
+        changes: result.changes,
+      });
+    } catch (error) {
+      console.error(
+        "DELETE /admin/students/:id :",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Erreur pendant la suppression de l’étudiant",
+        error: error.message,
+      });
+    }
+  }
+);
+
 export default router;
